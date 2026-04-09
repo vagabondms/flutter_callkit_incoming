@@ -22,6 +22,7 @@ interface CallkitEventCallback {
     enum class CallEvent {
         ACCEPT,
         DECLINE,
-        END
+        END,
+        TIMEOUT
     }
 }
