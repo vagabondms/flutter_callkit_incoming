@@ -5,6 +5,7 @@ import android.app.Notification
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Bundle
@@ -100,15 +101,35 @@ class CallkitNotificationService : Service() {
 
     private fun startForeground(notificationId: Int, notification: Notification, isVideo: Boolean) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            var mask =
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) { // 30+
-                mask = mask or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                if (isVideo) {
+            var mask = ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                // Android 14+ 부터 MICROPHONE/CAMERA FGS 타입은 RECORD_AUDIO/CAMERA 의
+                // 런타임 grant 가 있어야만 시작 가능. 미허용 상태에서 해당 비트를 추가하면
+                // SecurityException 으로 프로세스가 죽으므로, grant 된 권한에 한해 비트 추가한다.
+                if (ContextCompat.checkSelfPermission(
+                        this,
+                        android.Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED
+                ) {
+                    mask = mask or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                }
+                if (isVideo &&
+                    ContextCompat.checkSelfPermission(
+                        this,
+                        android.Manifest.permission.CAMERA
+                    ) == PackageManager.PERMISSION_GRANTED
+                ) {
                     mask = mask or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
                 }
             }
-            startForeground(notificationId, notification, mask)
+            try {
+                startForeground(notificationId, notification, mask)
+            } catch (e: SecurityException) {
+                // phoneCall 단독 mask 도 거부되는 극단 케이스 (eligible state, OEM 정책 등)
+                // 에서는 프로세스 크래시 대신 stopSelf 로 graceful 종료. 호출자
+                // (Dart `CallService.checkCallRelatedPermissionsIsDenied`) 가 이후 통화를 정리한다.
+                stopSelf()
+            }
         } else {
             startForeground(notificationId, notification)
         }
