@@ -6,12 +6,17 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 
 class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
     companion object {
         private const val TAG = "CallkitIncomingReceiver"
+        // notifyEventCallbacks 에 등록된 native 콜백이 HTTP/IO 등 비동기 작업을
+        // 완료할 시간을 BR 수명에 보장. ANR 한계(~10s) 보다 안전 마진 1s.
+        private const val TIMEOUT_BR_KEEP_ALIVE_MS = 9_000L
         var silenceEvents = false
 
         fun getIntent(context: Context, action: String, data: Bundle?) =
@@ -163,6 +168,18 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
             }
 
             "${context.packageName}.${CallkitConstants.ACTION_CALL_TIMEOUT}" -> {
+                // notifyEventCallbacks 에 등록된 native 콜백이 BR 종료 후에도
+                // 워커 스레드에서 HTTP/IO 를 완료할 수 있도록 프로세스를
+                // receiver-priority 로 ~9초 유지한다.
+                val pendingResult = goAsync()
+                Handler(Looper.getMainLooper()).postDelayed({
+                    try {
+                        pendingResult.finish()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to finish PendingResult", e)
+                    }
+                }, TIMEOUT_BR_KEEP_ALIVE_MS)
+
                 try {
                     FlutterCallkitIncomingPlugin.notifyEventCallbacks(CallkitEventCallback.CallEvent.TIMEOUT, data)
                     // clear notification and show miss notification
