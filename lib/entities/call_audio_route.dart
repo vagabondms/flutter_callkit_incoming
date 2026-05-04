@@ -3,6 +3,7 @@ enum CallAudioRoute {
   speaker,
   bluetooth,
   wiredHeadset,
+  carAudio,
   unknown;
 
   static CallAudioRoute fromJson(final Object? value) {

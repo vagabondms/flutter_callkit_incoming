@@ -193,6 +193,8 @@ final class CallAudioRouteManager: NSObject, FlutterStreamHandler {
             return "speaker"
         case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .airPlay:
             return "bluetooth"
+        case .carAudio:
+            return "carAudio"
         case .headphones, .headsetMic, .usbAudio:
             return "wiredHeadset"
         default:
@@ -202,7 +204,7 @@ final class CallAudioRouteManager: NSObject, FlutterStreamHandler {
 
     private func isExternalInput(_ input: AVAudioSessionPortDescription) -> Bool {
         switch input.portType {
-        case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .headphones, .headsetMic, .usbAudio:
+        case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .carAudio, .headphones, .headsetMic, .usbAudio:
             return true
         default:
             return false
