@@ -111,32 +111,66 @@ final class CallAudioRouteManager: NSObject, FlutterStreamHandler {
         let session = AVAudioSession.sharedInstance()
         let outputs = session.currentRoute.outputs
         let route = getRoute(callId: nil)
-        var devices: [[String: Any?]] = [
-            device(
-                id: "builtin_receiver",
-                name: "Phone",
-                route: "receiver",
-                selected: route == "receiver"
-            ),
-            device(
-                id: "builtin_speaker",
-                name: "Speaker",
-                route: "speaker",
-                selected: route == "speaker"
-            ),
-        ]
+        let selectedOutputIds = Set(outputs.map { "ios:\($0.uid)" })
+        var devices: [[String: Any?]] = []
+        var deviceIds = Set<String>()
+
+        appendDevice(
+            &devices,
+            ids: &deviceIds,
+            id: "builtin_receiver",
+            name: "Phone",
+            route: "receiver",
+            selected: route == "receiver"
+        )
+        appendDevice(
+            &devices,
+            ids: &deviceIds,
+            id: "builtin_speaker",
+            name: "Speaker",
+            route: "speaker",
+            selected: route == "speaker"
+        )
 
         for output in outputs where output.portType != .builtInReceiver && output.portType != .builtInSpeaker {
             let mappedRoute = routeName(for: output)
-            devices.append(device(
+            appendDevice(
+                &devices,
+                ids: &deviceIds,
                 id: "ios:\(output.uid)",
                 name: output.portName,
                 route: mappedRoute,
-                selected: route == mappedRoute
-            ))
+                selected: selectedOutputIds.contains("ios:\(output.uid)")
+            )
+        }
+
+        for input in session.availableInputs ?? [] where isExternalInput(input) {
+            appendDevice(
+                &devices,
+                ids: &deviceIds,
+                id: "ios:\(input.uid)",
+                name: input.portName,
+                route: routeName(for: input),
+                selected: selectedOutputIds.contains("ios:\(input.uid)")
+            )
         }
 
         return devices
+    }
+
+    private func appendDevice(
+        _ devices: inout [[String: Any?]],
+        ids: inout Set<String>,
+        id: String,
+        name: String,
+        route: String,
+        selected: Bool
+    ) {
+        guard !ids.contains(id) else {
+            return
+        }
+        ids.insert(id)
+        devices.append(device(id: id, name: name, route: route, selected: selected))
     }
 
     private func device(id: String, name: String, route: String, selected: Bool) -> [String: Any?] {
@@ -163,6 +197,15 @@ final class CallAudioRouteManager: NSObject, FlutterStreamHandler {
             return "wiredHeadset"
         default:
             return "unknown"
+        }
+    }
+
+    private func isExternalInput(_ input: AVAudioSessionPortDescription) -> Bool {
+        switch input.portType {
+        case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .headphones, .headsetMic, .usbAudio:
+            return true
+        default:
+            return false
         }
     }
 }
