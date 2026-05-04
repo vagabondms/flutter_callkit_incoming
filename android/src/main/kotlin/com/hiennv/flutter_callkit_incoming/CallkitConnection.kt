@@ -2,6 +2,7 @@ package com.hiennv.flutter_callkit_incoming
 
 import android.os.Build
 import android.os.Bundle
+import android.telecom.CallAudioState
 import android.telecom.Connection
 import android.telecom.DisconnectCause
 import android.util.Log
@@ -110,6 +111,11 @@ class CallkitConnection(
     override fun onUnhold() {
         super.onUnhold()
         setActive()
+    }
+
+    override fun onCallAudioStateChanged(state: CallAudioState) {
+        super.onCallAudioStateChanged(state)
+        CallAudioRouteManager.onCallAudioStateChanged(callId, state)
     }
 
     // -------------------------------------------------------------------------

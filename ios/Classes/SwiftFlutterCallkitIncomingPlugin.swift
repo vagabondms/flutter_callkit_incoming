@@ -30,6 +30,7 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
     private var streamHandlers: WeakArray<EventCallbackHandler> = WeakArray([])
     
     private var callManager: CallManager
+    private var callAudioRouteManager: CallAudioRouteManager
     
     private var sharedProvider: CXProvider? = nil
     
@@ -81,6 +82,7 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
     
     public init(messenger: FlutterBinaryMessenger) {
         callManager = CallManager()
+        callAudioRouteManager = CallAudioRouteManager()
     }
     
     private func shareHandlers(with registrar: FlutterPluginRegistrar) {
@@ -88,6 +90,7 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
         let eventsHandler = EventCallbackHandler()
         self.streamHandlers.append(eventsHandler)
         Self.createEventChannel(messenger: registrar.messenger()).setStreamHandler(eventsHandler)
+        callAudioRouteManager.register(with: registrar)
     }
     
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -229,6 +232,25 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
             break
         case "endNativeSubsystemOnly":
             result(true)
+            break
+        case "getCallAudioDevices":
+            let args = call.arguments as? [String: Any]
+            result(callAudioRouteManager.getDevices(callId: args?["id"] as? String))
+            break
+        case "getCallAudioRoute":
+            let args = call.arguments as? [String: Any]
+            result(callAudioRouteManager.getRoute(callId: args?["id"] as? String))
+            break
+        case "setCallAudioRoute":
+            let args = call.arguments as? [String: Any]
+            result(callAudioRouteManager.setRoute(
+                callId: args?["id"] as? String,
+                deviceId: args?["deviceId"] as? String ?? ""
+            ))
+            break
+        case "showCallAudioRoutePicker":
+            let args = call.arguments as? [String: Any]
+            result(callAudioRouteManager.showRoutePicker(callId: args?["id"] as? String))
             break
         case "setAudioRoute":
             result(true)

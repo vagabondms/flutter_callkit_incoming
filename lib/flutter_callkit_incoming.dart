@@ -8,7 +8,6 @@ import 'entities/entities.dart';
 
 import 'package:flutter/material.dart';
 
-
 /// Instance to use library functions.
 /// * showCallkitIncoming(dynamic)
 /// * startCall(dynamic)
@@ -22,15 +21,15 @@ typedef BackgroundMessageHandler = Future<void> Function(CallEvent callEvent);
 void _flutterCallkitIncomingCallbackDispatcher() {
   WidgetsFlutterBinding.ensureInitialized();
 
-  const MethodChannel backgroundChannel =
-  MethodChannel('flutter_callkit_incoming_background');
+  const MethodChannel backgroundChannel = MethodChannel(
+    'flutter_callkit_incoming_background',
+  );
 
-  const MethodChannel channel =
-  MethodChannel('flutter_callkit_incoming');
+  const MethodChannel channel = MethodChannel('flutter_callkit_incoming');
 
   backgroundChannel.setMethodCallHandler((MethodCall call) async {
     final int rawHandle =
-      await channel.invokeMethod<int>('getBackgroundHandler') ?? 0;
+        await channel.invokeMethod<int>('getBackgroundHandler') ?? 0;
 
     final callback = PluginUtilities.getCallbackFromHandle(
       CallbackHandle.fromRawHandle(rawHandle),
@@ -42,30 +41,35 @@ void _flutterCallkitIncomingCallbackDispatcher() {
 }
 
 class FlutterCallkitIncoming {
-
-  static const MethodChannel _channel =
-      MethodChannel('flutter_callkit_incoming');
-  static const EventChannel _eventChannel =
-      EventChannel('flutter_callkit_incoming_events');
-
+  static const MethodChannel _channel = MethodChannel(
+    'flutter_callkit_incoming',
+  );
+  static const EventChannel _eventChannel = EventChannel(
+    'flutter_callkit_incoming_events',
+  );
+  static const EventChannel _callAudioRouteEventChannel = EventChannel(
+    'flutter_callkit_incoming_call_audio_route_events',
+  );
 
   /// Set a message handler function which is called when the app is in the
   /// background or terminated.
   ///
   /// This provided handler must be a top-level function and cannot be
   /// anonymous otherwise an [ArgumentError] will be thrown.
-  static Future<void> onBackgroundMessage(BackgroundMessageHandler handler) async {
+  static Future<void> onBackgroundMessage(
+    BackgroundMessageHandler handler,
+  ) async {
     final CallbackHandle pluginHandle = PluginUtilities.getCallbackHandle(
       _flutterCallkitIncomingCallbackDispatcher,
     )!;
-    final CallbackHandle userHandle = PluginUtilities.getCallbackHandle(handler)!;
-    await _channel.invokeMapMethod('registerBackgroundHandler',
-        {
-          'pluginHandle': pluginHandle.toRawHandle(),
-          'userHandle': userHandle.toRawHandle()
-        });
+    final CallbackHandle userHandle = PluginUtilities.getCallbackHandle(
+      handler,
+    )!;
+    await _channel.invokeMapMethod('registerBackgroundHandler', {
+      'pluginHandle': pluginHandle.toRawHandle(),
+      'userHandle': userHandle.toRawHandle(),
+    });
   }
-
 
   /// Listen to event callback from [FlutterCallkitIncoming].
   ///
@@ -86,6 +90,12 @@ class FlutterCallkitIncoming {
   /// }
   static Stream<CallEvent?> get onEvent =>
       _eventChannel.receiveBroadcastStream().map(_receiveCallEvent);
+
+  static Stream<CallAudioRouteChangedEvent> get onCallAudioRouteChanged =>
+      _callAudioRouteEventChannel
+          .receiveBroadcastStream()
+          .where((data) => data is Map)
+          .map((data) => CallAudioRouteChangedEvent.fromJson(data as Map));
 
   /// Show Callkit Incoming.
   /// On iOS, using Callkit. On Android, using a custom UI.
@@ -158,6 +168,39 @@ class FlutterCallkitIncoming {
   /// On Android: only return last call
   static Future<dynamic> activeCalls() async {
     return await _channel.invokeMethod("activeCalls");
+  }
+
+  static Future<List<CallAudioDevice>> getCallAudioDevices(String id) async {
+    final result = await _channel.invokeMethod<List<dynamic>>(
+      "getCallAudioDevices",
+      {'id': id},
+    );
+    return (result ?? const [])
+        .whereType<Map<dynamic, dynamic>>()
+        .map(CallAudioDevice.fromJson)
+        .toList(growable: false);
+  }
+
+  static Future<CallAudioRoute> getCallAudioRoute(String id) async {
+    final result = await _channel.invokeMethod<String>("getCallAudioRoute", {
+      'id': id,
+    });
+    return CallAudioRoute.fromJson(result);
+  }
+
+  static Future<bool> setCallAudioRoute(String id, String deviceId) async {
+    return await _channel.invokeMethod<bool>("setCallAudioRoute", {
+          'id': id,
+          'deviceId': deviceId,
+        }) ??
+        false;
+  }
+
+  static Future<bool> showCallAudioRoutePicker(String id) async {
+    return await _channel.invokeMethod<bool>("showCallAudioRoutePicker", {
+          'id': id,
+        }) ??
+        false;
   }
 
   /// Get device push token VoIP.

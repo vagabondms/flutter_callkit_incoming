@@ -44,6 +44,7 @@ class FlutterCallkitIncomingPlugin : FlutterPlugin, MethodCallHandler, ActivityA
 
         private val methodChannels = mutableMapOf<BinaryMessenger, MethodChannel>()
         private val eventChannels = mutableMapOf<BinaryMessenger, EventChannel>()
+        private val callAudioRouteEventChannels = mutableMapOf<BinaryMessenger, EventChannel>()
         private val eventHandlers = mutableMapOf<BinaryMessenger, EventCallbackHandler>()
         private val eventCallbacks = mutableListOf<WeakReference<CallkitEventCallback>>()
 
@@ -134,6 +135,15 @@ class FlutterCallkitIncomingPlugin : FlutterPlugin, MethodCallHandler, ActivityA
             val handler = EventCallbackHandler()
             eventHandlers[binaryMessenger] = handler
             events.setStreamHandler(handler)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val callAudioRouteEvents = EventChannel(
+                    binaryMessenger,
+                    "flutter_callkit_incoming_call_audio_route_events"
+                )
+                callAudioRouteEventChannels[binaryMessenger] = callAudioRouteEvents
+                callAudioRouteEvents.setStreamHandler(CallAudioRouteManager.createStreamHandler())
+            }
         }
     }
 
@@ -362,6 +372,38 @@ class FlutterCallkitIncomingPlugin : FlutterPlugin, MethodCallHandler, ActivityA
                     result.success(getDataActiveCallsForFlutter(context))
                 }
 
+                "getCallAudioDevices" -> {
+                    val callId = call.argument<String>("id") ?: ""
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        result.success(CallAudioRouteManager.getDevices(callId))
+                    } else {
+                        result.success(emptyList<Map<String, Any?>>())
+                    }
+                }
+
+                "getCallAudioRoute" -> {
+                    val callId = call.argument<String>("id") ?: ""
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        result.success(CallAudioRouteManager.getRoute(callId))
+                    } else {
+                        result.success("unknown")
+                    }
+                }
+
+                "setCallAudioRoute" -> {
+                    val callId = call.argument<String>("id") ?: ""
+                    val deviceId = call.argument<String>("deviceId") ?: ""
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        result.success(CallAudioRouteManager.setRoute(callId, deviceId))
+                    } else {
+                        result.success(false)
+                    }
+                }
+
+                "showCallAudioRoutePicker" -> {
+                    result.success(false)
+                }
+
                 "getDevicePushTokenVoIP" -> {
                     result.success("")
                 }
@@ -416,6 +458,7 @@ class FlutterCallkitIncomingPlugin : FlutterPlugin, MethodCallHandler, ActivityA
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         methodChannels.remove(binding.binaryMessenger)?.setMethodCallHandler(null)
         eventChannels.remove(binding.binaryMessenger)?.setStreamHandler(null)
+        callAudioRouteEventChannels.remove(binding.binaryMessenger)?.setStreamHandler(null)
         eventHandlers.remove(binding.binaryMessenger)
 
         // Only destroy managers when all engine bindings are detached
