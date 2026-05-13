@@ -1,5 +1,6 @@
 package com.hiennv.flutter_callkit_incoming
 
+import android.content.Context
 import android.os.Build
 import android.os.Bundle
 import android.telecom.CallAudioState
@@ -8,6 +9,7 @@ import android.telecom.DisconnectCause
 import android.util.Log
 import androidx.annotation.RequiresApi
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Self-managed Telecom [Connection] implementation for flutter_callkit_incoming.
@@ -32,9 +34,17 @@ import java.util.concurrent.ConcurrentHashMap
  */
 @RequiresApi(Build.VERSION_CODES.M)
 class CallkitConnection(
+    context: Context,
     val callId: String,
     val bundle: Bundle,
 ) : Connection() {
+
+    private val appContext = context.applicationContext
+    private val acceptRouted = AtomicBoolean(false)
+    private val terminalRouted = AtomicBoolean(false)
+
+    @Volatile
+    private var accepted = false
 
     companion object {
         private const val TAG = "CallkitConnection"
@@ -83,24 +93,55 @@ class CallkitConnection(
         super.onAnswer()
         Log.d(TAG, "onAnswer id=$callId")
         setActive()
+        routeAccept("telecom_on_answer")
     }
 
     override fun onReject() {
         super.onReject()
         Log.d(TAG, "onReject id=$callId")
-        finishWithCause(DisconnectCause.REJECTED)
+        routeTerminal(
+            CallkitConstants.ACTION_CALL_DECLINE,
+            "telecom_on_reject",
+            DisconnectCause.REJECTED,
+        )
     }
 
     override fun onDisconnect() {
         super.onDisconnect()
-        Log.d(TAG, "onDisconnect id=$callId")
-        finishWithCause(DisconnectCause.LOCAL)
+        val wasAccepted = accepted
+        Log.d(TAG, "onDisconnect id=$callId accepted=$wasAccepted")
+        if (wasAccepted) {
+            routeTerminal(
+                CallkitConstants.ACTION_CALL_ENDED,
+                "telecom_on_disconnect_after_accept",
+                DisconnectCause.LOCAL,
+            )
+        } else {
+            routeTerminal(
+                CallkitConstants.ACTION_CALL_TIMEOUT,
+                "telecom_on_disconnect_before_accept",
+                DisconnectCause.MISSED,
+            )
+        }
     }
 
     override fun onAbort() {
         super.onAbort()
-        Log.d(TAG, "onAbort id=$callId")
-        finishWithCause(DisconnectCause.UNKNOWN)
+        val wasAccepted = accepted
+        Log.d(TAG, "onAbort id=$callId accepted=$wasAccepted")
+        if (wasAccepted) {
+            routeTerminal(
+                CallkitConstants.ACTION_CALL_ENDED,
+                "telecom_on_abort_after_accept",
+                DisconnectCause.UNKNOWN,
+            )
+        } else {
+            routeTerminal(
+                CallkitConstants.ACTION_CALL_TIMEOUT,
+                "telecom_on_abort_before_accept",
+                DisconnectCause.UNKNOWN,
+            )
+        }
     }
 
     override fun onHold() {
@@ -125,25 +166,71 @@ class CallkitConnection(
     /** Mark the call as answered — user accepted via app notification. */
     fun markAccepted() {
         Log.d(TAG, "markAccepted id=$callId")
+        accepted = true
+        acceptRouted.compareAndSet(false, true)
         setActive()
     }
 
     /** Mark the call as declined/ended — user declined via app notification. */
     fun markDeclined() {
         Log.d(TAG, "markDeclined id=$callId")
+        terminalRouted.compareAndSet(false, true)
         finishWithCause(DisconnectCause.REJECTED)
     }
 
     /** Mark the call as terminated — call ended (either side hung up). */
     fun markEnded() {
         Log.d(TAG, "markEnded id=$callId")
+        terminalRouted.compareAndSet(false, true)
         finishWithCause(DisconnectCause.LOCAL)
     }
 
     /** Mark the call as missed — timeout without answer. */
     fun markMissed() {
         Log.d(TAG, "markMissed id=$callId")
+        terminalRouted.compareAndSet(false, true)
         finishWithCause(DisconnectCause.MISSED)
+    }
+
+    private fun routeAccept(source: String) {
+        accepted = true
+        if (!acceptRouted.compareAndSet(false, true)) {
+            Log.d(TAG, "accept already routed id=$callId source=$source")
+            return
+        }
+        routeToReceiver(CallkitConstants.ACTION_CALL_ACCEPT, source)
+    }
+
+    private fun routeTerminal(action: String, source: String, disconnectCause: Int) {
+        if (terminalRouted.compareAndSet(false, true)) {
+            routeToReceiver(action, source)
+        } else {
+            Log.d(TAG, "terminal already routed id=$callId source=$source")
+        }
+        finishWithCause(disconnectCause)
+    }
+
+    private fun routeToReceiver(action: String, source: String) {
+        val data = Bundle(bundle)
+        val intent = when (action) {
+            CallkitConstants.ACTION_CALL_ACCEPT ->
+                CallkitIncomingBroadcastReceiver.getIntentAccept(appContext, data)
+            CallkitConstants.ACTION_CALL_DECLINE ->
+                CallkitIncomingBroadcastReceiver.getIntentDecline(appContext, data)
+            CallkitConstants.ACTION_CALL_ENDED ->
+                CallkitIncomingBroadcastReceiver.getIntentEnded(appContext, data)
+            CallkitConstants.ACTION_CALL_TIMEOUT ->
+                CallkitIncomingBroadcastReceiver.getIntentTimeout(appContext, data)
+            else -> return
+        }.apply {
+            putExtra(CallkitIncomingBroadcastReceiver.EXTRA_CALLKIT_EVENT_SOURCE, source)
+        }
+        try {
+            appContext.sendBroadcast(intent)
+            Log.d(TAG, "routed action=$action id=$callId source=$source")
+        } catch (e: Exception) {
+            Log.w(TAG, "routeToReceiver failed action=$action id=$callId: ${e.message}")
+        }
     }
 
     private fun finishWithCause(cause: Int) {

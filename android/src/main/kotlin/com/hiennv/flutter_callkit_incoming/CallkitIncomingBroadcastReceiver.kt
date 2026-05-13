@@ -13,16 +13,22 @@ import android.os.Looper
 import android.telecom.TelecomManager
 import android.util.Log
 import androidx.core.content.ContextCompat
+import java.util.LinkedHashSet
 
 class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
     companion object {
         private const val TAG = "CallkitIncomingReceiver"
+        const val EXTRA_CALLKIT_EVENT_SOURCE = "com.hiennv.flutter_callkit_incoming.EVENT_SOURCE"
         // notifyEventCallbacks 에 등록된 native 콜백이 HTTP/IO 등 비동기 작업을
         // 완료할 시간을 BR 수명에 보장. ANR 한계(~10s) 보다 안전 마진 1s.
         // DECLINE / ENDED / TIMEOUT 분기에서 공통 사용.
         private const val EVENT_CALLBACK_BR_KEEP_ALIVE_MS = 9_000L
+        private const val CALLBACK_DEDUPE_MAX_ENTRIES = 512
         var silenceEvents = false
+        private val callbackDedupeLock = Any()
+        private val acceptedCallbackIds = LinkedHashSet<String>()
+        private val terminalCallbackIds = LinkedHashSet<String>()
 
         fun getIntent(context: Context, action: String, data: Bundle?) =
             Intent(context, CallkitIncomingBroadcastReceiver::class.java).apply {
@@ -168,6 +174,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val action = intent.action ?: return
         val data = intent.extras?.getBundle(CallkitConstants.EXTRA_CALLKIT_INCOMING_DATA) ?: return
+        intent.getStringExtra(EXTRA_CALLKIT_EVENT_SOURCE)?.let { data.putString(EXTRA_CALLKIT_EVENT_SOURCE, it) }
 
         Log.d(TAG, action)
 
@@ -207,7 +214,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
                     // Transition the Telecom Connection to ACTIVE first — the OS
                     // uses this to dismiss keyguard on self-managed PhoneAccounts.
                     driveTelecomConnection(data, CallkitConstants.ACTION_CALL_ACCEPT)
-                    FlutterCallkitIncomingPlugin.notifyEventCallbacks(CallkitEventCallback.CallEvent.ACCEPT, data)
+                    notifyEventCallbacksOnce(CallkitEventCallback.CallEvent.ACCEPT, data)
                     // start service and show ongoing call when call is accepted
                     CallkitNotificationService.startServiceWithAction(
                         context,
@@ -226,7 +233,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
                 try {
                     // Notify native decline callbacks
                     driveTelecomConnection(data, CallkitConstants.ACTION_CALL_DECLINE)
-                    FlutterCallkitIncomingPlugin.notifyEventCallbacks(CallkitEventCallback.CallEvent.DECLINE, data)
+                    notifyEventCallbacksOnce(CallkitEventCallback.CallEvent.DECLINE, data)
                     // clear notification
                     getCallkitNotificationManager()?.clearIncomingNotification(data, false)
                     sendEventFlutter(CallkitConstants.ACTION_CALL_DECLINE, data)
@@ -239,7 +246,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
             "${context.packageName}.${CallkitConstants.ACTION_CALL_ENDED}" -> {
                 keepProcessAliveForEventCallback()
                 try {
-                    FlutterCallkitIncomingPlugin.notifyEventCallbacks(CallkitEventCallback.CallEvent.END, data)
+                    notifyEventCallbacksOnce(CallkitEventCallback.CallEvent.END, data)
                     // clear notification and stop service
                     driveTelecomConnection(data, CallkitConstants.ACTION_CALL_ENDED)
                     getCallkitNotificationManager()?.clearIncomingNotification(data, false)
@@ -254,7 +261,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
             "${context.packageName}.${CallkitConstants.ACTION_CALL_TIMEOUT}" -> {
                 keepProcessAliveForEventCallback()
                 try {
-                    FlutterCallkitIncomingPlugin.notifyEventCallbacks(CallkitEventCallback.CallEvent.TIMEOUT, data)
+                    notifyEventCallbacksOnce(CallkitEventCallback.CallEvent.TIMEOUT, data)
                     // clear notification and show miss notification
                     driveTelecomConnection(data, CallkitConstants.ACTION_CALL_TIMEOUT)
                     val notificationManager = getCallkitNotificationManager()
@@ -290,6 +297,63 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
                 }
             }
         }
+    }
+
+    private fun notifyEventCallbacksOnce(event: CallkitEventCallback.CallEvent, data: Bundle) {
+        if (shouldNotifyEventCallbacks(event, data)) {
+            FlutterCallkitIncomingPlugin.notifyEventCallbacks(event, data)
+        }
+    }
+
+    private fun shouldNotifyEventCallbacks(event: CallkitEventCallback.CallEvent, data: Bundle): Boolean {
+        val callId = callIdentity(data) ?: return true
+        val shouldNotify = synchronized(callbackDedupeLock) {
+            when (event) {
+                CallkitEventCallback.CallEvent.ACCEPT -> {
+                    if (terminalCallbackIds.contains(callId)) {
+                        false
+                    } else {
+                        rememberCallId(acceptedCallbackIds, callId)
+                    }
+                }
+                CallkitEventCallback.CallEvent.DECLINE,
+                CallkitEventCallback.CallEvent.END,
+                CallkitEventCallback.CallEvent.TIMEOUT -> rememberCallId(terminalCallbackIds, callId)
+            }
+        }
+        if (!shouldNotify) {
+            Log.d(
+                TAG,
+                "Skipping duplicate native callback event=$event id=$callId source=${data.getString(EXTRA_CALLKIT_EVENT_SOURCE)}",
+            )
+        }
+        return shouldNotify
+    }
+
+    private fun rememberCallId(set: LinkedHashSet<String>, callId: String): Boolean {
+        if (!set.add(callId)) return false
+        while (set.size > CALLBACK_DEDUPE_MAX_ENTRIES) {
+            val iterator = set.iterator()
+            if (iterator.hasNext()) {
+                iterator.next()
+                iterator.remove()
+            }
+        }
+        return true
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun callIdentity(data: Bundle): String? {
+        data.getString(CallkitConstants.EXTRA_CALLKIT_ID)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
+
+        val extra = try {
+            data.getSerializable(CallkitConstants.EXTRA_CALLKIT_EXTRA) as? HashMap<String, Any?>
+        } catch (e: Exception) {
+            null
+        }
+        return extra?.get("callId")?.toString()?.takeIf { it.isNotBlank() }
     }
 
     /**
