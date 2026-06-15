@@ -1,16 +1,14 @@
 package com.hiennv.flutter_callkit_incoming
 
 import android.content.Context
-import android.content.Intent
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.telecom.Connection
 import android.telecom.DisconnectCause
 import android.util.Log
 import androidx.annotation.RequiresApi
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Self-managed Telecom [Connection] implementation for flutter_callkit_incoming.
@@ -24,9 +22,9 @@ import java.util.concurrent.ConcurrentHashMap
  * Lifecycle:
  *  1. [CallkitConnectionService.onCreateIncomingConnection] returns a
  *     ringing Connection instance.
- *  2. User taps Accept in our notification → plugin's BroadcastReceiver maps the
+ *  2. User taps Accept in our notification -> plugin's BroadcastReceiver maps the
  *     broadcast to the matching connection via [find] and calls [setActive].
- *  3. User taps Decline / End → [setDisconnected] + [destroy] → unregister.
+ *  3. User taps Decline / End -> [setDisconnected] + [destroy] -> unregister.
  *
  * Connection lookup uses a process-wide [ConcurrentHashMap] keyed by the call id
  * (the plugin's existing `Data.id` field). The OS holds the Connection object in
@@ -35,9 +33,17 @@ import java.util.concurrent.ConcurrentHashMap
  */
 @RequiresApi(Build.VERSION_CODES.M)
 class CallkitConnection(
+    context: Context,
     val callId: String,
     val bundle: Bundle,
 ) : Connection() {
+
+    private val appContext = context.applicationContext
+    private val acceptRouted = AtomicBoolean(false)
+    private val terminalRouted = AtomicBoolean(false)
+
+    @Volatile
+    private var accepted = false
 
     companion object {
         private const val TAG = "CallkitConnection"
@@ -73,37 +79,59 @@ class CallkitConnection(
         Log.d(TAG, "Connection created id=$callId active=${activeCount()}")
     }
 
-    // -------------------------------------------------------------------------
-    // Telecom → app lifecycle callbacks
-    //
-    // These fire when the user interacts with the OS-level call UI (system
-    // dialer, car Bluetooth, watch, etc.). In our app-driven model we still
-    // handle the primary Accept/Decline via our own notification buttons, but
-    // the OS can also trigger these — we must honor both paths.
-    // -------------------------------------------------------------------------
-
     override fun onAnswer() {
         super.onAnswer()
         Log.d(TAG, "onAnswer id=$callId")
         setActive()
+        routeAccept("telecom_on_answer")
     }
 
     override fun onReject() {
         super.onReject()
         Log.d(TAG, "onReject id=$callId")
-        finishWithCause(DisconnectCause.REJECTED)
+        routeTerminal(
+            CallkitConstants.ACTION_CALL_DECLINE,
+            "telecom_on_reject",
+            DisconnectCause.REJECTED,
+        )
     }
 
     override fun onDisconnect() {
         super.onDisconnect()
-        Log.d(TAG, "onDisconnect id=$callId")
-        finishWithCause(DisconnectCause.LOCAL)
+        val wasAccepted = accepted
+        Log.d(TAG, "onDisconnect id=$callId accepted=$wasAccepted")
+        if (wasAccepted) {
+            routeTerminal(
+                CallkitConstants.ACTION_CALL_ENDED,
+                "telecom_on_disconnect_after_accept",
+                DisconnectCause.LOCAL,
+            )
+        } else {
+            routeTerminal(
+                CallkitConstants.ACTION_CALL_TIMEOUT,
+                "telecom_on_disconnect_before_accept",
+                DisconnectCause.MISSED,
+            )
+        }
     }
 
     override fun onAbort() {
         super.onAbort()
-        Log.d(TAG, "onAbort id=$callId")
-        finishWithCause(DisconnectCause.UNKNOWN)
+        val wasAccepted = accepted
+        Log.d(TAG, "onAbort id=$callId accepted=$wasAccepted")
+        if (wasAccepted) {
+            routeTerminal(
+                CallkitConstants.ACTION_CALL_ENDED,
+                "telecom_on_abort_after_accept",
+                DisconnectCause.UNKNOWN,
+            )
+        } else {
+            routeTerminal(
+                CallkitConstants.ACTION_CALL_TIMEOUT,
+                "telecom_on_abort_before_accept",
+                DisconnectCause.UNKNOWN,
+            )
+        }
     }
 
     override fun onHold() {
@@ -116,99 +144,74 @@ class CallkitConnection(
         setActive()
     }
 
-    // -------------------------------------------------------------------------
-    // App → Telecom driving helpers (invoked by the plugin's BroadcastReceiver)
-    // -------------------------------------------------------------------------
-
     /** Mark the call as answered — user accepted via app notification. */
     fun markAccepted() {
         Log.d(TAG, "markAccepted id=$callId")
+        accepted = true
+        acceptRouted.compareAndSet(false, true)
         setActive()
     }
 
-    /**
-     * Mark the call as declined/ended — user declined via app notification.
-     *
-     * Cold-launch DECLINE recovery is fired
-     * from inside the self-managed [Connection] context (and *before*
-     * [setDisconnected] runs) so the call is still in the RINGING state when
-     * [Context.startActivity] is invoked. The hope: Android 14+ BAL grants a
-     * PHONE_CALL exemption for active self-managed Telecom calls. Previous
-     * placement inside the BroadcastReceiver hit BAL_BLOCK with
-     * `callingUidProcState: BOUND_FOREGROUND_SERVICE; callingUidHasVisibleActivity: false`
-     * (Galaxy logcat 2026-05-05 03:49:04.039).
-     *
-     * If this position still BAL_BLOCK's, the next escalation is to promote
-     * `CallkitConnectionService` to a `foregroundServiceType="phoneCall"`
-     * FGS for the lifetime of the connection.
-     */
-    fun markDeclined(context: Context) {
+    /** Mark the call as declined/ended — user declined via app notification. */
+    fun markDeclined() {
         Log.d(TAG, "markDeclined id=$callId")
-        triggerDeclineRecovery(context)
-        // [H' fix 2026-05-05 v2] Delay finishWithCause so the self-managed
-        // call stays RINGING long enough for:
-        //   1. MainActivity to bootstrap the main FlutterEngine (~100ms).
-        //   2. SealedSender service to cold-init (secure_storage open +
-        //      JWT load + server verify-key fetch — ~1~2s, network-bound).
-        //   3. callSignalingProvider → callServiceProvider → callProvider
-        //      to rebuild from _IdleCallNotifier into the real CallNotifier
-        //      whose ctor finally fires _consumePendingVoipDecline.
-        // The 1500ms first attempt was insufficient (logcat showed Activity
-        // booted + Dart plugins ran, but real CallNotifier ctor never reached
-        // before delay expired and Activity was killed).
-        // Trade-off: Telecom phone state stays RINGING for ~3s after decline.
-        // The notification is already dismissed by the BroadcastReceiver
-        // path, so the user sees no UI artifact — only the system-level
-        // call state lingers briefly while Dart finishes wiring.
-        Handler(Looper.getMainLooper()).postDelayed({
-            Log.d(TAG, "[H' fix] delayed finishWithCause id=$callId")
-            finishWithCause(DisconnectCause.REJECTED)
-        }, 3000L)
-    }
-
-    /**
-     * Persist declined nonce and start MainActivity. Idempotent — safe even
-     * if the BroadcastReceiver fallback also fires (single-task launch flag,
-     * one-shot consumePending).
-     */
-    private fun triggerDeclineRecovery(context: Context) {
-        try {
-            val prefs = context.getSharedPreferences(
-                "flutter_callkit_incoming_decline",
-                Context.MODE_PRIVATE,
-            )
-            prefs.edit()
-                .putString("pending_nonce", callId)
-                .putLong("pending_at", System.currentTimeMillis())
-                .apply()
-            Log.d(TAG, "[DIAG-DECLINE-CS] prefs written nonce=$callId")
-            val launchIntent = AppUtils.getAppIntent(context, null, null)
-            launchIntent?.addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_NO_USER_ACTION or
-                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT,
-            )
-            if (launchIntent != null) {
-                context.startActivity(launchIntent)
-                Log.d(TAG, "[DIAG-DECLINE-CS] startActivity dispatched (CS ctx, RINGING)")
-            } else {
-                Log.w(TAG, "[DIAG-DECLINE-CS] launchIntent null — recovery skipped")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "[DIAG-DECLINE-CS] recovery failed: ${e.message}")
-        }
+        terminalRouted.compareAndSet(false, true)
+        finishWithCause(DisconnectCause.REJECTED)
     }
 
     /** Mark the call as terminated — call ended (either side hung up). */
     fun markEnded() {
         Log.d(TAG, "markEnded id=$callId")
+        terminalRouted.compareAndSet(false, true)
         finishWithCause(DisconnectCause.LOCAL)
     }
 
     /** Mark the call as missed — timeout without answer. */
     fun markMissed() {
         Log.d(TAG, "markMissed id=$callId")
+        terminalRouted.compareAndSet(false, true)
         finishWithCause(DisconnectCause.MISSED)
+    }
+
+    private fun routeAccept(source: String) {
+        accepted = true
+        if (!acceptRouted.compareAndSet(false, true)) {
+            Log.d(TAG, "accept already routed id=$callId source=$source")
+            return
+        }
+        routeToReceiver(CallkitConstants.ACTION_CALL_ACCEPT, source)
+    }
+
+    private fun routeTerminal(action: String, source: String, disconnectCause: Int) {
+        if (terminalRouted.compareAndSet(false, true)) {
+            routeToReceiver(action, source)
+        } else {
+            Log.d(TAG, "terminal already routed id=$callId source=$source")
+        }
+        finishWithCause(disconnectCause)
+    }
+
+    private fun routeToReceiver(action: String, source: String) {
+        val data = Bundle(bundle)
+        val intent = when (action) {
+            CallkitConstants.ACTION_CALL_ACCEPT ->
+                CallkitIncomingBroadcastReceiver.getIntentAccept(appContext, data)
+            CallkitConstants.ACTION_CALL_DECLINE ->
+                CallkitIncomingBroadcastReceiver.getIntentDecline(appContext, data)
+            CallkitConstants.ACTION_CALL_ENDED ->
+                CallkitIncomingBroadcastReceiver.getIntentEnded(appContext, data)
+            CallkitConstants.ACTION_CALL_TIMEOUT ->
+                CallkitIncomingBroadcastReceiver.getIntentTimeout(appContext, data)
+            else -> return
+        }.apply {
+            putExtra(CallkitIncomingBroadcastReceiver.EXTRA_CALLKIT_EVENT_SOURCE, source)
+        }
+        try {
+            appContext.sendBroadcast(intent)
+            Log.d(TAG, "routed action=$action id=$callId source=$source")
+        } catch (e: Exception) {
+            Log.w(TAG, "routeToReceiver failed action=$action id=$callId: ${e.message}")
+        }
     }
 
     private fun finishWithCause(cause: Int) {

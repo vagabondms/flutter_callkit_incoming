@@ -10,6 +10,7 @@ package com.hiennv.flutter_callkit_incoming
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -197,11 +198,11 @@ class CallkitNotificationManager(
         notificationBuilder?.setOngoing(true)
         notificationBuilder?.setAutoCancel(false)
         notificationBuilder?.setWhen(System.currentTimeMillis())
-        notificationBuilder?.setTimeoutAfter(
-            data.getLong(
-                CallkitConstants.EXTRA_CALLKIT_DURATION, 0L
-            )
-        )
+        val durationMs = data.getLong(CallkitConstants.EXTRA_CALLKIT_DURATION, 0L)
+        // setTimeoutAfter only controls notification expiry. It can be delayed by OEM policy,
+        // so schedule an explicit timeout broadcast as the authoritative timeout source.
+        notificationBuilder?.setTimeoutAfter(durationMs)
+        scheduleTimeoutAlarm(notificationId, data, durationMs)
         notificationBuilder?.setOnlyAlertOnce(true)
         notificationBuilder?.setSound(null)
         notificationBuilder?.setFullScreenIntent(
@@ -854,6 +855,7 @@ class CallkitNotificationManager(
         context.sendBroadcast(CallkitIncomingActivity.getIntentEnded(context, isAccepted))
         val notificationId =
             data.getString(CallkitConstants.EXTRA_CALLKIT_ID, "callkit_incoming").hashCode()
+        cancelTimeoutAlarm(notificationId, data)
         getNotificationManager().cancel(notificationId)
         targetInComingAvatarDefault?.let {
             targetInComingAvatarDefault?.isCancelled = true
@@ -973,6 +975,47 @@ class CallkitNotificationManager(
     private fun getTimeOutPendingIntent(id: Int, data: Bundle): PendingIntent {
         val timeOutIntent = CallkitIncomingBroadcastReceiver.getIntentTimeout(context, data)
         return PendingIntent.getBroadcast(context, id, timeOutIntent, getFlagPendingIntent())
+    }
+
+    private fun scheduleTimeoutAlarm(id: Int, data: Bundle, durationMs: Long) {
+        if (durationMs <= 0L) return
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+        val triggerAtMs = System.currentTimeMillis() + durationMs
+        val timeoutPendingIntent = getTimeOutPendingIntent(id, data)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarmManager.canScheduleExactAlarms()) {
+                    alarmManager.setExactAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        triggerAtMs,
+                        timeoutPendingIntent,
+                    )
+                } else {
+                    alarmManager.setAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        triggerAtMs,
+                        timeoutPendingIntent,
+                    )
+                }
+            } else {
+                alarmManager.setExact(
+                    AlarmManager.RTC_WAKEUP,
+                    triggerAtMs,
+                    timeoutPendingIntent,
+                )
+            }
+        } catch (_: SecurityException) {
+            alarmManager.set(
+                AlarmManager.RTC_WAKEUP,
+                triggerAtMs,
+                timeoutPendingIntent,
+            )
+        }
+    }
+
+    private fun cancelTimeoutAlarm(id: Int, data: Bundle) {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+        alarmManager.cancel(getTimeOutPendingIntent(id, data))
     }
 
     private fun getCallbackPendingIntent(id: Int, data: Bundle): PendingIntent {
