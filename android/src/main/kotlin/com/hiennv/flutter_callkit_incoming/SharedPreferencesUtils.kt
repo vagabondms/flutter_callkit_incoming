@@ -7,6 +7,7 @@ import com.fasterxml.jackson.core.type.TypeReference
 
 
 private const val CALLKIT_PREFERENCES_FILE_NAME = "flutter_callkit_incoming"
+private const val SHARED_PREFS_TAG = "CallkitSharedPrefs"
 private var prefs: SharedPreferences? = null
 private var editor: SharedPreferences.Editor? = null
 
@@ -21,9 +22,7 @@ fun addBackgroundCallback(context: Context?, pluginHandler: Long, userHandle: Lo
 }
 
 fun addCall(context: Context?, data: Data, isAccepted: Boolean = false) {
-    val json = getString(context, "ACTIVE_CALLS", "[]")
-    val arrayData: ArrayList<Data> = Utils.getGsonInstance()
-        .readValue(json, object : TypeReference<ArrayList<Data>>() {})
+    val arrayData = readActiveCalls(context)
     val currentData = arrayData.find { it == data }
     if(currentData != null) {
         currentData.isAccepted = isAccepted
@@ -35,10 +34,7 @@ fun addCall(context: Context?, data: Data, isAccepted: Boolean = false) {
 }
 
 fun removeCall(context: Context?, data: Data) {
-    val json = getString(context, "ACTIVE_CALLS", "[]")
-    Log.d("JSON", json!!)
-    val arrayData: ArrayList<Data> = Utils.getGsonInstance()
-        .readValue(json, object : TypeReference<ArrayList<Data>>() {})
+    val arrayData = readActiveCalls(context)
     arrayData.remove(data)
     putString(context, "ACTIVE_CALLS", Utils.getGsonInstance().writeValueAsString(arrayData))
 }
@@ -57,14 +53,35 @@ fun getUserCallback(context: Context?): Long? {
 }
 
 fun getDataActiveCalls(context: Context?): ArrayList<Data> {
-    val json = getString(context, "ACTIVE_CALLS", "[]")
-    return Utils.getGsonInstance()
-        .readValue(json, object : TypeReference<ArrayList<Data>>() {})
+    return readActiveCalls(context)
 }
 
 fun getDataActiveCallsForFlutter(context: Context?): ArrayList<Map<String, Any?>> {
-    val json = getString(context, "ACTIVE_CALLS", "[]")
-    return Utils.getGsonInstance().readValue(json, object : TypeReference<ArrayList<Map<String, Any?>>>() {})
+    val json = getString(context, "ACTIVE_CALLS", "[]") ?: "[]"
+    return try {
+        Utils.getGsonInstance().readValue(json, object : TypeReference<ArrayList<Map<String, Any?>>>() {})
+    } catch (e: Exception) {
+        Log.w(SHARED_PREFS_TAG, "ACTIVE_CALLS unreadable — resetting to empty: ${e.message}")
+        putString(context, "ACTIVE_CALLS", "[]")
+        arrayListOf()
+    }
+}
+
+/**
+ * Every ACTIVE_CALLS access is read-first, so a payload the current parser
+ * cannot read would otherwise wedge the store permanently (no write path is
+ * ever reached to overwrite it — endAllCalls included). Reset-on-failure
+ * keeps the invariant: this store can always be read.
+ */
+private fun readActiveCalls(context: Context?): ArrayList<Data> {
+    val json = getString(context, "ACTIVE_CALLS", "[]") ?: "[]"
+    return try {
+        Utils.getGsonInstance().readValue(json, object : TypeReference<ArrayList<Data>>() {})
+    } catch (e: Exception) {
+        Log.w(SHARED_PREFS_TAG, "ACTIVE_CALLS unreadable — resetting to empty: ${e.message}")
+        putString(context, "ACTIVE_CALLS", "[]")
+        arrayListOf()
+    }
 }
 
 fun putLong(context: Context?, key: String, value: Long) {

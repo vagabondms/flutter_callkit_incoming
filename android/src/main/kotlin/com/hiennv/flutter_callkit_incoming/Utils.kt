@@ -3,6 +3,7 @@ package com.hiennv.flutter_callkit_incoming
 import android.content.Context
 import android.content.Intent
 import android.content.res.Resources
+import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
 import java.lang.ref.WeakReference
 
@@ -16,7 +17,13 @@ class Utils {
 
         fun getGsonInstance(): ObjectMapper {
             if (mapper == null) {
-                mapper = ObjectMapper()
+                // Tolerate fields written by other plugin versions: persisted
+                // ACTIVE_CALLS must survive upgrades that add/remove Data fields
+                // (Jackson's default FAIL_ON_UNKNOWN_PROPERTIES rejects the whole
+                // payload otherwise).
+                mapper = ObjectMapper().apply {
+                    configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+                }
             }
             return mapper!!
         }
