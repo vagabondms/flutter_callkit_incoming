@@ -84,7 +84,7 @@ class FlutterCallkitIncoming {
   /// Event.DID_UPDATE_DEVICE_PUSH_TOKEN_VOIP - only iOS
   /// }
   static Stream<CallEvent?> get onEvent =>
-      _eventChannel.receiveBroadcastStream().map(_receiveCallEvent);
+      _eventChannel.receiveBroadcastStream().map(_receiveCallEventSafely);
 
   /// Handle accept call from background when the app was killed.
   static void acceptCallHandle(ActionEvent handler) {
@@ -231,6 +231,19 @@ class FlutterCallkitIncoming {
     return await _channel.invokeMethod("canUseFullScreenIntent");
   }
 
+  /// A parsing failure must cost one event, not the stream: without this
+  /// guard, a native/Dart key mismatch injects an error into the broadcast
+  /// stream on every affected event (see upstream issue #837).
+  static CallEvent? _receiveCallEventSafely(dynamic data) {
+    try {
+      return _receiveCallEvent(data);
+    } catch (error, stackTrace) {
+      debugPrint(
+          '[flutter_callkit_incoming] dropped unparsable event: $error\n$stackTrace');
+      return null;
+    }
+  }
+
   static CallEvent? _receiveCallEvent(dynamic data) {
     if (data is! Map) {
       return null;
@@ -342,7 +355,10 @@ class FlutterCallkitIncoming {
         return CallEventActionCallToggleGroup(id, callUUIDToGroupWith);
       case CallEventConstants.actionCallToggleAudioSession:
         final body = data['body'] as Map<Object?, Object?>?;
-        final isActive = body?['isActive'] as bool?;
+        // Native has always sent this flag as 'isActivate' (both platforms,
+        // unchanged since 3.0.0); the 3.1.0 sealed-class refactor misread it
+        // as 'isActive', throwing on every audio-session toggle.
+        final isActive = body?['isActivate'] as bool?;
         if (isActive == null) {
           throw const FormatException(
               '[ACTION_CALL_TOGGLE_AUDIO_SESSION] id is null.');
