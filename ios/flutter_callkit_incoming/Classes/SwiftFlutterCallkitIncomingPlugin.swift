@@ -868,17 +868,28 @@ public class SwiftFlutterCallkitIncomingPlugin: NSObject, FlutterPlugin, CXProvi
 
 class EventCallbackHandler: NSObject, FlutterStreamHandler {
     private var eventSink: FlutterEventSink?
-    
+    // Events sent before Dart subscribes (cold start: the CallKit UI is up
+    // while the Flutter engine is still booting) would otherwise be dropped
+    // silently — an accept/decline tapped in that window never reaches the
+    // app. Buffer them and flush in order on onListen.
+    private var pendingEvents: [[String: Any]] = []
+
     public func send(_ event: String, _ body: Any) {
         let data: [String : Any] = [
             "event": event,
             "body": body
         ]
-        eventSink?(data)
+        guard let sink = eventSink else {
+            pendingEvents.append(data)
+            return
+        }
+        sink(data)
     }
-    
+
     func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         self.eventSink = events
+        pendingEvents.forEach { events($0) }
+        pendingEvents.removeAll()
         return nil
     }
     
