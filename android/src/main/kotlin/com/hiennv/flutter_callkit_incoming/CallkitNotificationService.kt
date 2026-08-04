@@ -145,14 +145,17 @@ class CallkitNotificationService : Service() {
             ) {
                 mask = mask or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             }
+            // Fallback must pin PHONE_CALL explicitly: on targetSdk 34+ the untyped
+            // overload re-applies every manifest-declared type (incl. MICROPHONE),
+            // which would rethrow the very SecurityException caught here.
             try {
                 startForeground(notificationId, notification, mask)
             } catch (e: SecurityException) {
                 Log.w("CallkitNotificationSvc", "startForeground with type mask failed: ${e.message}")
-                startForeground(notificationId, notification)
+                startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL)
             } catch (e: IllegalArgumentException) {
                 Log.w("CallkitNotificationSvc", "startForeground with type mask rejected: ${e.message}")
-                startForeground(notificationId, notification)
+                startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL)
             }
         } else {
             startForeground(notificationId, notification)
