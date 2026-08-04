@@ -24,7 +24,11 @@ class InAppCallManager(private val context: Context) {
         val componentName = ComponentName(context, CallkitConnectionService::class.java)
         val handle = PhoneAccountHandle(componentName, ACCOUNT_ID)
 
-        val phoneAccount = PhoneAccount.builder(handle, "Callkit Incoming In-App Call")
+        // Some OEM surfaces (lock screen, call chips) can display the
+        // PhoneAccount label to the user — show the app's name, not plugin
+        // internals.
+        val appLabel = context.applicationInfo.loadLabel(context.packageManager)
+        val phoneAccount = PhoneAccount.builder(handle, appLabel)
             .setCapabilities(PhoneAccount.CAPABILITY_SELF_MANAGED)
             .build()
 
