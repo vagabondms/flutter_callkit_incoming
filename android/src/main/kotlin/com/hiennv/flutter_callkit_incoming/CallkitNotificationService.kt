@@ -1,14 +1,17 @@
 package com.hiennv.flutter_callkit_incoming
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.util.Log
 import androidx.core.content.ContextCompat
 
 class CallkitNotificationService : Service() {
@@ -88,25 +91,31 @@ class CallkitNotificationService : Service() {
         val callkitNotification =
             getCallkitNotificationManager()?.getOnGoingCallNotification(bundle, false)
         if (callkitNotification != null) {
-            val typeCall = bundle.getInt(CallkitConstants.EXTRA_CALLKIT_TYPE, -1)
-            startForeground(
-                callkitNotification.id,
-                callkitNotification.notification,
-                typeCall > 0
-            )
+            promoteToForeground(callkitNotification.id, callkitNotification.notification)
         }
     }
 
-    private fun startForeground(notificationId: Int, notification: Notification, isVideo: Boolean) {
+    // FOREGROUND_SERVICE_TYPE_MICROPHONE is only legal while RECORD_AUDIO is granted
+    // (Android 14+ throws SecurityException otherwise), and this service starts
+    // natively at call-accept — before any Dart code could check permissions.
+    private fun promoteToForeground(notificationId: Int, notification: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             var mask = ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            ) {
                 mask = mask or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                if (isVideo) {
-                    mask = mask or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
-                }
             }
-            startForeground(notificationId, notification, mask)
+            try {
+                startForeground(notificationId, notification, mask)
+            } catch (e: SecurityException) {
+                Log.w("CallkitNotificationSvc", "startForeground with type mask failed: ${e.message}")
+                startForeground(notificationId, notification)
+            } catch (e: IllegalArgumentException) {
+                Log.w("CallkitNotificationSvc", "startForeground with type mask rejected: ${e.message}")
+                startForeground(notificationId, notification)
+            }
         } else {
             startForeground(notificationId, notification)
         }
