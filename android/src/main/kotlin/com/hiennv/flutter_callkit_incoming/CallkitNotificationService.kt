@@ -3,6 +3,8 @@ package com.hiennv.flutter_callkit_incoming
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -12,11 +14,16 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 
 class CallkitNotificationService : Service() {
 
     companion object {
+
+        private const val FALLBACK_NOTIFICATION_ID = 918273
+        private const val FALLBACK_CHANNEL_ID = "callkit_incoming_fgs_fallback"
 
         private val ActionForeground = listOf(
             CallkitConstants.ACTION_CALL_START,
@@ -92,7 +99,38 @@ class CallkitNotificationService : Service() {
             getCallkitNotificationManager()?.getOnGoingCallNotification(bundle, false)
         if (callkitNotification != null) {
             promoteToForeground(callkitNotification.id, callkitNotification.notification)
+        } else {
+            // The plugin singleton can be gone when this service starts (process
+            // death then stale start, engine detached). We were started via
+            // startForegroundService(), so startForeground() must still run —
+            // otherwise Android 12+ kills the app with
+            // ForegroundServiceDidNotStartInTimeException. Satisfy the contract
+            // with a minimal notification, then stop.
+            promoteToForeground(FALLBACK_NOTIFICATION_ID, buildFallbackNotification())
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            stopSelf()
         }
+    }
+
+    private fun buildFallbackNotification(): Notification {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (nm.getNotificationChannel(FALLBACK_CHANNEL_ID) == null) {
+                nm.createNotificationChannel(
+                    NotificationChannel(
+                        FALLBACK_CHANNEL_ID,
+                        "Ongoing call",
+                        NotificationManager.IMPORTANCE_LOW,
+                    ),
+                )
+            }
+        }
+        return NotificationCompat.Builder(this, FALLBACK_CHANNEL_ID)
+            .setSmallIcon(applicationInfo.icon)
+            .setContentTitle(applicationInfo.loadLabel(packageManager))
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
     }
 
     // FOREGROUND_SERVICE_TYPE_MICROPHONE is only legal while RECORD_AUDIO is granted
